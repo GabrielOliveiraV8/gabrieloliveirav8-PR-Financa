@@ -1,0 +1,9 @@
+PR Finança — revisão de classificação do Cubo
+
+Regras revisadas:
+- CLIENTES: somente lançamentos cujo Tipo seja CLIENTES recebem D+ e entram em CONTAS À RECEBER.
+- FORNECEDORES: somente lançamentos cujo Tipo seja FORNECEDORES entram em CONTAS À PAGAR.
+- IMPOSTOS E CONTRIBUICOES: categoria própria; não entra como fornecedor no detalhamento, mas é somada a CONTAS À PAGAR no resumo principal.
+- Se uma nova carteira/bloco vier sem Tipo, o sistema não herda automaticamente CLIENTES do bloco anterior. Usa o valor preenchido como fallback: Valor Fornecedor > 0 => FORNECEDORES; Valor Cliente > 0 => CLIENTES. Caso contrário fica não classificado.
+- A planilha Excel mostra o dia da semana junto com a data no cabeçalho (ex.: 29/09 - Terça-feira). A data técnica usada pelas fórmulas fica na linha oculta.
+- As tabelas pequenas mantêm Duplicata | Nome | Valor para fornecedores e impostos.

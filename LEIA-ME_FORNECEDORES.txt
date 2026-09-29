@@ -1,0 +1,13 @@
+ATUALIZAÇÃO — FORNECEDORES
+
+O Cubo novo traz:
+Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente
+
+Agora o aplicativo:
+- lê o nome do Cliente/Fornecedor;
+- mantém a data do bloco nas linhas de continuação;
+- guarda o fornecedor no Detalhamento;
+- lista todos os fornecedores nas CONTAS À PAGAR da previsão;
+- soma lançamentos repetidos do mesmo fornecedor no mesmo dia;
+- não limita a previsão a 5 fornecedores por dia;
+- mantém o cálculo do pagamento pela data original, sem D+.
