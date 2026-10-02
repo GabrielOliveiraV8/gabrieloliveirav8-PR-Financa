@@ -680,7 +680,7 @@ with st.sidebar:
             },
         )
 
-    with st.expander("🏦 Dias sem compensação", expanded=False):
+    with st.expander("📅 Feriados", expanded=False):
         fer_default = pd.DataFrame({
             "Data": pd.Series(dtype="datetime64[ns]"),
             "Descrição": pd.Series(dtype="string"),
@@ -758,11 +758,11 @@ nomes = [nomes_semana[d.weekday()] for d in dias]
 # ============================================================
 from html import escape
 
-DIAS_SEMANA_EXT = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira",
-                    "Sexta-feira", "Sábado", "Domingo"]
+DIAS_SEMANA_EXT = ["Segunda", "Terça", "Quarta", "Quinta",
+                    "Sexta", "Sábado", "Domingo"]
 
 def fmt_dia_semana(d):
-    """Ex.: '29/09 - Terça-feira' — usado em toda tabela que exibe datas."""
+    """Ex.: '29/09 - Terça' — usado em toda tabela que exibe datas."""
     d = pd.Timestamp(d)
     return f"{d.strftime('%d/%m')} - {DIAS_SEMANA_EXT[d.weekday()]}"
 
@@ -856,8 +856,12 @@ total_cols = len(dias) + 1
 rows_html.append(f'<tr class="titulo"><td colspan="{total_cols}">PREVISÃO FINANCEIRA SEMANAL</td></tr>')
 rows_html.append('<tr class="dias"><td></td>' + ''.join(f'<td>{fmt_dia_semana(dias[i])}</td>' for i in range(len(dias)) ) + '</tr>')
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
-rows_html.append('<tr class="secao"><td colspan="{total_cols}">SALDO INICIAL</td></tr>')
-rows_html.append('<tr class="linha"><td></td><td class="num">' + _fmt_num(saldo_inicial) + '</td><td></td><td></td><td></td><td></td></tr>')
+rows_html.append(
+    '<tr class="saldo-inicial"><td>SALDO INICIAL</td>'
+    + f'<td class="num">{_fmt_num(saldo_inicial)}</td>'
+    + ''.join('<td></td>' for _ in range(max(0, len(dias) - 1)))
+    + '</tr>'
+)
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
 rows_html.append('<tr class="secao"><td>CONTAS À RECEBER</td>' + ''.join(f'<td class="num">{_fmt_num(v)}</td>' for v in recv_by_day) + '</tr>')
 for carteira in carteiras_recebimento:
@@ -909,6 +913,8 @@ html = f'''
 .previsao .dias td {{ text-align:center; font-weight:700; border-bottom:1px solid #222; }}
 .previsao .dias span {{ font-weight:400; }}
 .previsao .secao td {{ font-weight:700; border-bottom:1px solid #222; padding-top:7px; }}
+.previsao .saldo-inicial td {{ font-weight:700; border-bottom:1px solid #222; padding:7px 8px; }}
+.previsao .saldo-inicial .num {{ text-align:right; }}
 .previsao .sub td {{ border:0; }}
 .previsao .saldo td {{ font-weight:700; border-top:1px solid #222; border-bottom:1px solid #222; padding:6px 8px; }}
 .previsao .data td {{ font-weight:700; padding-top:10px; border-bottom:1px solid #222; }}
