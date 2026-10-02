@@ -641,15 +641,22 @@ st.title("💰 Previsão Financeira")
 st.caption("Modelo baseado no layout da planilha de previsão utilizada atualmente.")
 
 with st.sidebar:
-    st.header("Configuração da simulação")
+    st.header("⚙️ Ferramentas")
+    st.caption("Tudo o que você precisa para montar a previsão está aqui.")
+
+    st.subheader("📥 Entrada de dados")
+    uploaded = st.file_uploader("Carregar CSV bruto", type=["csv"], help="Selecione o arquivo CSV exportado do Tecnicon.")
+
+    st.divider()
+    st.subheader("📅 Previsão")
     saldo_inicial = st.number_input("Saldo inicial", min_value=0.0, value=50000.0, step=100.0, format="%.2f")
     data_inicio = st.date_input(
-        "Data inicial da previsão",
+        "Data inicial",
         value=date.today() - timedelta(days=date.today().weekday()),
         format="DD/MM/YYYY",
     )
     data_fim = st.date_input(
-        "Data final da previsão",
+        "Data final",
         value=data_inicio + timedelta(days=4),
         format="DD/MM/YYYY",
     )
@@ -660,38 +667,39 @@ with st.sidebar:
         st.error("A previsão pode ter no máximo 5 dias para manter o layout do Excel.")
         st.stop()
 
-    st.divider()
-    st.subheader("Carteiras / D+")
-    cfg_default = pd.DataFrame({"Carteira": ["100", "33", "102", "74"], "D+": [1, 1, 0, 1]})
-    config = st.data_editor(
-        cfg_default,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="config",
-        column_config={
-            "Carteira": st.column_config.TextColumn("Carteira"),
-            "D+": st.column_config.NumberColumn("D+", min_value=0, step=1),
-        },
-    )
+    with st.expander("💳 Carteiras / D+", expanded=False):
+        cfg_default = pd.DataFrame({"Carteira": ["100", "33", "102", "74"], "D+": [1, 1, 0, 1]})
+        config = st.data_editor(
+            cfg_default,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="config",
+            column_config={
+                "Carteira": st.column_config.TextColumn("Carteira"),
+                "D+": st.column_config.NumberColumn("D+", min_value=0, step=1),
+            },
+        )
 
-    st.divider()
-    st.subheader("Dias sem compensação")
-    fer_default = pd.DataFrame({
-        "Data": pd.Series(dtype="datetime64[ns]"),
-        "Descrição": pd.Series(dtype="string"),
-    })
-    feriados = st.data_editor(
-        fer_default,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="feriados",
-        column_config={
-            "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-            "Descrição": st.column_config.TextColumn("Descrição"),
-        },
-    )
+    with st.expander("🏦 Dias sem compensação", expanded=False):
+        fer_default = pd.DataFrame({
+            "Data": pd.Series(dtype="datetime64[ns]"),
+            "Descrição": pd.Series(dtype="string"),
+        })
+        feriados = st.data_editor(
+            fer_default,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="feriados",
+            column_config={
+                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "Descrição": st.column_config.TextColumn("Descrição"),
+            },
+        )
 
-uploaded = st.file_uploader("📥 Carregar CSV bruto", type=["csv"])
+    # Espaço reservado para os downloads, preenchido depois do processamento.
+    st.divider()
+    st.subheader("📤 Exportação")
+    download_area = st.empty()
 
 if uploaded is None:
     st.info("Carregue o cubo bruto para gerar a previsão. Sem arquivo, o sistema mostra somente a estrutura.")
@@ -725,46 +733,7 @@ if "Data" in feriados.columns:
         except Exception:
             pass
 
-# ============================================================
-# Detecção automática de novas carteiras
-# ============================================================
-# Uma carteira é considerada "nova" quando aparece no CSV entre os
-# lançamentos de CLIENTES, mas seu código ainda não está cadastrado
-# na tabela Carteiras / D+.
-clientes_tmp = df[df["Tipo"].map(eh_cliente)].copy()
-clientes_tmp["Código"] = clientes_tmp["Código"].astype(str).str.strip()
-clientes_tmp["Carteira"] = clientes_tmp["Carteira"].astype(str).str.strip()
-
-configuradas = {str(k).strip() for k in map_d.keys() if str(k).strip()}
-novas_carteiras = (
-    clientes_tmp.loc[
-        (clientes_tmp["Código"] != "")
-        & (~clientes_tmp["Código"].isin(configuradas)),
-        ["Código", "Carteira"],
-    ]
-    .drop_duplicates()
-    .sort_values(["Carteira", "Código"], kind="stable")
-)
-
-if not novas_carteiras.empty:
-    st.warning(
-        "⚠️ Nova carteira encontrada no CSV. "
-        "Ela ainda não possui D+ cadastrado e será calculada provisoriamente com D+1."
-    )
-    aviso_novas = novas_carteiras.rename(
-        columns={"Código": "Código da carteira", "Carteira": "Nome da carteira"}
-    ).copy()
-    aviso_novas["D+ provisório"] = 1
-    st.dataframe(
-        aviso_novas[["Código da carteira", "Nome da carteira", "D+ provisório"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption(
-        "Para corrigir a regra, cadastre o código da carteira na tabela "
-        "'Carteiras / D+' da barra lateral e informe o D+ correto."
-    )
-
+# D+ não cadastrado usa D+1 como padrão, sem alerta na interface.
 df["D+"] = df["Código"].astype(str).str.strip().map(map_d).fillna(1).astype(int)
 
 df["Data Entrada"] = df.apply(
@@ -908,19 +877,24 @@ rows_html.append(f'<tr class="secao"><td colspan="{total_cols}">CONTAS À PAGAR<
 for idx, d in enumerate(dias):
     reg = fornecedores_por_dia[idx]
     rows_html.append(f'<tr class="data"><td>{fmt_dia_semana(d)}</td><td colspan="{max(1, total_cols-1)}"></td></tr>')
-    rows_html.append('<tr class="cabecalho-mini"><td>Duplicata</td><td>Nome</td><td colspan="3">Valor</td><td></td></tr>')
+    # A tabela de detalhes usa sempre a mesma coluna de valor, independentemente
+    # do dia. Assim os números não ficam pulando de uma coluna para outra.
+    valor_colspan = max(1, total_cols - 2)
+    rows_html.append(
+        f'<tr class="cabecalho-mini"><td>Duplicata</td>'
+        f'<td colspan="{valor_colspan}">Nome</td><td>Valor</td></tr>'
+    )
     for _, r in reg.iterrows():
-        vals = [''] * 5
-        vals[idx] = _fmt_num(r["Valor Fornecedor"])
         rows_html.append(
             f'<tr class="fornecedor"><td>{escape(str(r["Duplicata"]))}</td>'
-            f'<td>{escape(str(r["Nome Exibicao"]).strip() or "(sem nome)")}</td>'
-            f'<td colspan="3" class="num">{vals[idx]}</td><td></td></tr>'
+            f'<td colspan="{valor_colspan}">{escape(str(r["Nome Exibicao"]).strip() or "(sem nome)")}</td>'
+            f'<td class="num">{_fmt_num(r["Valor Fornecedor"])}</td></tr>'
         )
     total = float(reg["Valor Fornecedor"].sum()) if not reg.empty else 0.0
-    vals = [''] * 5
-    vals[idx] = _fmt_num(total)
-    rows_html.append('<tr class="total"><td>Total</td>' + ''.join(f'<td class="num">{v}</td>' for v in vals) + '</tr>')
+    rows_html.append(
+        f'<tr class="total"><td>Total</td><td colspan="{valor_colspan}"></td>'
+        f'<td class="num">{_fmt_num(total)}</td></tr>'
+    )
 
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
 
@@ -959,11 +933,12 @@ st.dataframe(det.sort_values(["Data bruto", "Carteira"]), use_container_width=Tr
 
 # Downloads
 excel_bytes = gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=data_fim)
-st.download_button(
+download_area.download_button(
     "📊 Baixar previsão em Excel",
     data=excel_bytes,
     file_name=f"Previsao_Financeira_{data_inicio.strftime('%Y%m%d')}_{data_fim.strftime('%Y%m%d')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
 )
 
 csv_result = pd.DataFrame({
@@ -973,9 +948,10 @@ csv_result = pd.DataFrame({
     "Saldo": saldos,
 })
 csv_bytes = csv_result.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
-st.download_button(
+download_area.download_button(
     "📄 Baixar resultado CSV",
     data=csv_bytes,
     file_name=f"Previsao_Financeira_{data_inicio.strftime('%Y%m%d')}_{data_fim.strftime('%Y%m%d')}.csv",
     mime="text/csv",
+    use_container_width=True,
 )
