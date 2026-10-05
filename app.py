@@ -324,8 +324,14 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
         axis=1,
     )
 
-    # Contas a pagar: data exata do lançamento.
-    work["Data Saída"] = work["Data"]
+    # Contas a pagar: sábado/domingo/feriado entram no próximo dia
+    # de compensação, exatamente como a previsão do painel.
+    work["Data Saída"] = work.apply(
+        lambda r: proxima_compensacao(
+            r["Data"], 0, sem_comp
+        ) if eh_fornecedor(r["Tipo"]) or eh_imposto(r["Tipo"]) else pd.NaT,
+        axis=1,
+    )
 
     # O leitor do CSV trabalha inicialmente com objetos `date`.
     # Antes de usar o acessador `.dt`, convertemos explicitamente as
@@ -819,7 +825,14 @@ df["Data Entrada"] = df.apply(
     axis=1,
 )
 
-df["Data Saída"] = df["Data"]
+# CONTAS À PAGAR: se o vencimento cair em sábado, domingo ou feriado,
+# a saída entra no próximo dia de compensação (ex.: sábado/domingo -> segunda).
+# Isso evita perder pagamentos do fim de semana na previsão semanal.
+df["Data Saída"] = df.apply(
+    lambda r: proxima_compensacao(r["Data"], 0, sem_comp)
+    if eh_fornecedor(r["Tipo"]) or eh_imposto(r["Tipo"]) else pd.NaT,
+    axis=1,
+)
 
 receber = df[df["Tipo"].map(eh_cliente)].copy()
 pagar = df[df["Tipo"].map(eh_fornecedor)].copy()

@@ -16,3 +16,7 @@ O usuário deve carregar os dois arquivos na barra lateral.
 - `Previsao_Financeira_Modelo.xlsx`
 
 O aplicativo continua compatível com o Streamlit Community Cloud.
+
+
+### Regra de fim de semana
+Contas a pagar com vencimento em sábado, domingo ou feriado são deslocadas para o próximo dia de compensação (por exemplo, sábado/domingo entram na segunda-feira).
