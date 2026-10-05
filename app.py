@@ -47,20 +47,100 @@ def parse_br_date(v):
 
 def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
     """
-    Lê o Cubo Financeiro.
+    Lê automaticamente os dois layouts de saída encontrados no Tecnicon:
 
-    Formato atual observado:
-      Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;
-      Cliente/Fornecedor;Valor Fornecedor;Valor Cliente;
+    1) Cubo financeiro atual:
+       Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;
+       Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente
 
-    As linhas seguintes podem deixar carteira/código/data/tipo em branco.
-    Nesses casos, a linha pertence ao bloco anterior e deve herdar a data
-    e o restante da identificação.
+    2) Relatório "DUPLICATAS DE FORNECEDORES A VENCER":
+       CODIGO;FL;FORNECEDOR;DUPLICATA;PARCELA;VALOR;IRRF NF;
+       VLR EM MOEDA;CODIGO;CARTEIRA;FL
 
-    Também mantém compatibilidade com o formato antigo de 6 campos, no
-    qual não havia a coluna Cliente/Fornecedor.
+    O segundo layout usa blocos "VENCIMENTO: dd/mm/aaaa;". A data é
+    herdada pelas linhas seguintes até aparecer um novo vencimento.
     """
-    raw = uploaded_file.getvalue().decode("utf-8-sig", errors="replace")
+    dados = uploaded_file.getvalue()
+    try:
+        raw = dados.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raw = dados.decode("cp1252", errors="replace")
+
+    # ------------------------------------------------------------
+    # Layout 2: DUPLICATAS DE FORNECEDORES A VENCER
+    # ------------------------------------------------------------
+    if "DUPLICATAS DE FORNECEDORES A VENCER" in raw.upper():
+        registros = []
+        data_vencimento = pd.NaT
+
+        for linha in raw.splitlines():
+            linha = linha.strip()
+            if not linha:
+                continue
+
+            # Ex.: VENCIMENTO: 09/09/2026;
+            if linha.upper().startswith("VENCIMENTO:"):
+                valor_data = linha.split(":", 1)[1].strip().rstrip(";").strip()
+                parsed = parse_br_date(valor_data)
+                if not pd.isna(parsed):
+                    data_vencimento = parsed
+                continue
+
+            partes = [p.strip() for p in linha.split(";")]
+            if not partes:
+                continue
+
+            primeira = partes[0].upper()
+            # Ignora títulos, cabeçalhos, separadores e totais.
+            if (
+                primeira.startswith("SOBERANA ALIMENTOS")
+                or primeira.startswith("DUPLICATAS DE FORNECEDORES")
+                or primeira.startswith("CODIGO")
+                or primeira.startswith("_")
+                or primeira.startswith("TOTAL VENCIMENTO")
+            ):
+                continue
+
+            while len(partes) < 11:
+                partes.append("")
+
+            # Uma linha de lançamento possui fornecedor + duplicata + valor.
+            # O Tecnicon pode omitir o campo "VLR EM MOEDA" quando ele está
+            # vazio. Por isso, as posições finais são lidas pelo conteúdo: os
+            # três últimos campos não vazios são CODIGO, CARTEIRA e FL.
+            fornecedor_nome = partes[2]
+            duplicata = partes[3]
+            valor = parse_money(partes[5])
+
+            finais = [p for p in partes[6:] if p.strip()]
+            if len(finais) < 3:
+                continue
+            carteira_codigo, carteira_nome, _fl = finais[-3:]
+
+            if pd.isna(data_vencimento):
+                continue
+            if not fornecedor_nome or not duplicata:
+                continue
+            if valor == 0:
+                continue
+
+            registros.append({
+                "Carteira": carteira_codigo,
+                "Código": carteira_codigo,
+                "Data": data_vencimento,
+                "Tipo": "FORNECEDORES",
+                "Fornecedor": fornecedor_nome,
+                "Duplicata": duplicata,
+                "Valor Fornecedor": valor,
+                "Valor Cliente": 0.0,
+                "Carteira Nome": carteira_nome,
+            })
+
+        return pd.DataFrame(registros)
+
+    # ------------------------------------------------------------
+    # Layout 1: Cubo financeiro atual / antigo
+    # ------------------------------------------------------------
     registros = []
     carteira = ""
     codigo = ""
@@ -76,30 +156,22 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
         partes = [p.strip() for p in linha.split(";")]
         n_campos_original = len(partes)
 
-        # Remove apenas colunas vazias excedentes do final.
         while len(partes) > 0 and partes[-1] == "":
             partes.pop()
 
-        # Ignora cabeçalho.
         if partes and "CarteiraCód." in partes[0]:
             continue
 
-        # Formato novo: 7 campos, incluindo Cliente/Fornecedor.
         if n_campos_original >= 8:
             while len(partes) < 8:
                 partes.append("")
 
-            # Novo bloco quando a carteira estiver preenchida.
-            # O TIPO informado pelo Cubo é a regra principal de classificação.
-            # Nunca carregamos silenciosamente o tipo do bloco anterior quando
-            # uma nova carteira vier com o campo Tipo vazio.
             novo_bloco = bool(partes[0])
             if novo_bloco:
                 carteira = partes[0]
                 codigo = partes[1]
                 tipo = partes[3].strip() if partes[3].strip() else ""
 
-            # Data só aparece na primeira linha do grupo.
             if partes[2]:
                 parsed = parse_br_date(partes[2])
                 if not pd.isna(parsed):
@@ -108,14 +180,11 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
             if pd.isna(data_atual):
                 continue
 
-            # Formato atual do Tecnicon:
-            # Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente
             duplicata = partes[4]
             fornecedor_nome = partes[5]
             fornecedor = parse_money(partes[6])
             cliente = parse_money(partes[7])
 
-        # Compatibilidade com formato antigo: 6 campos.
         else:
             while len(partes) < 6:
                 partes.append("")
@@ -151,10 +220,6 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
 
     df_result = pd.DataFrame(registros)
 
-    # Classificação final: CLIENTES, FORNECEDORES ou IMPOSTOS.
-    # Em linhas normais, o campo Tipo do Cubo é soberano. Se um novo bloco
-    # vier sem Tipo, usamos os valores somente como fallback para evitar que
-    # uma carteira/lançamento seja herdada incorretamente como CLIENTE.
     if not df_result.empty:
         df_result["Tipo"] = df_result["Tipo"].fillna("").astype(str).str.strip()
         tipo_upper = df_result["Tipo"].str.upper()
