@@ -1,22 +1,21 @@
-# PR Finança — teste online
+# PR Finança — versão para teste online
 
-## Arquivos de entrada
+Esta pasta é a versão atual do aplicativo de Previsão Financeira, preparada para publicação no Streamlit Community Cloud.
 
-A versão de teste usa **dois CSVs**, porque os dois relatórios têm funções diferentes:
-
-1. **CSV de recebimentos (Cubo)** — fornece CONTAS À RECEBER e os impostos do Cubo.
-2. **CSV de saídas / fornecedores** — relatório Tecnicon **DUPLICATAS DE FORNECEDORES A VENCER**, usado para CONTAS À PAGAR.
-
-O usuário deve carregar os dois arquivos na barra lateral.
+## Arquivos principais
+- `app.py` — aplicativo Streamlit.
+- `Previsao_Financeira_Modelo.xlsx` — modelo Excel usado na exportação.
+- `requirements.txt` — dependências.
 
 ## Publicação
+1. Crie um repositório no GitHub.
+2. Envie estes arquivos para a raiz do repositório.
+3. No Streamlit Community Cloud, escolha **Create app**.
+4. Selecione o repositório, a branch e o arquivo `app.py`.
+5. Publique.
 
-- `app.py`
-- `requirements.txt`
-- `Previsao_Financeira_Modelo.xlsx`
+## Observação importante
+O aplicativo online desta etapa é somente para testar os cálculos e a interface.
+O bot Playwright/Tecnicon não está incluído nesta versão.
 
-O aplicativo continua compatível com o Streamlit Community Cloud.
-
-
-### Regra de fim de semana
-Contas a pagar com vencimento em sábado, domingo ou feriado são deslocadas para o próximo dia de compensação (por exemplo, sábado/domingo entram na segunda-feira).
+O CSV é carregado pelo usuário pelo navegador e o Excel é gerado pelo próprio aplicativo.

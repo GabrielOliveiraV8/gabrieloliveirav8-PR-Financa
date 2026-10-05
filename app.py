@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -45,26 +47,31 @@ def parse_br_date(v):
 # As linhas seguintes podem deixar carteira/código em branco.
 # ============================================================
 
-def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
-    """Lê o Cubo Financeiro usado para CONTAS À RECEBER.
+def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
+    """
+    Lê o Cubo Financeiro.
 
-    Formato observado:
+    Formato atual observado:
       Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;
-      Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente;
+      Cliente/Fornecedor;Valor Fornecedor;Valor Cliente;
 
     As linhas seguintes podem deixar carteira/código/data/tipo em branco.
-    """
-    dados = uploaded_file.getvalue()
-    try:
-        raw = dados.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raw = dados.decode("cp1252", errors="replace")
+    Nesses casos, a linha pertence ao bloco anterior e deve herdar a data
+    e o restante da identificação.
 
+    Também mantém compatibilidade com o formato antigo de 6 campos, no
+    qual não havia a coluna Cliente/Fornecedor.
+    """
+    if hasattr(uploaded_file, "getvalue"):
+        raw = uploaded_file.getvalue().decode("utf-8-sig", errors="replace")
+    else:
+        raw = Path(uploaded_file).read_bytes().decode("utf-8-sig", errors="replace")
     registros = []
     carteira = ""
     codigo = ""
     tipo = ""
     data_atual = pd.NaT
+    duplicata = ""
 
     for linha in raw.splitlines():
         linha = linha.strip()
@@ -73,22 +80,31 @@ def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
 
         partes = [p.strip() for p in linha.split(";")]
         n_campos_original = len(partes)
-        while partes and partes[-1] == "":
+
+        # Remove apenas colunas vazias excedentes do final.
+        while len(partes) > 0 and partes[-1] == "":
             partes.pop()
 
+        # Ignora cabeçalho.
         if partes and "CarteiraCód." in partes[0]:
             continue
 
-        # Layout atual do Cubo: 8 campos.
+        # Formato novo: 7 campos, incluindo Cliente/Fornecedor.
         if n_campos_original >= 8:
             while len(partes) < 8:
                 partes.append("")
 
-            if partes[0]:
+            # Novo bloco quando a carteira estiver preenchida.
+            # O TIPO informado pelo Cubo é a regra principal de classificação.
+            # Nunca carregamos silenciosamente o tipo do bloco anterior quando
+            # uma nova carteira vier com o campo Tipo vazio.
+            novo_bloco = bool(partes[0])
+            if novo_bloco:
                 carteira = partes[0]
                 codigo = partes[1]
                 tipo = partes[3].strip() if partes[3].strip() else ""
 
+            # Data só aparece na primeira linha do grupo.
             if partes[2]:
                 parsed = parse_br_date(partes[2])
                 if not pd.isna(parsed):
@@ -97,13 +113,14 @@ def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
             if pd.isna(data_atual):
                 continue
 
-            # Ordem real do Cubo: Duplicata; Cliente/Fornecedor; Valor Fornecedor; Valor Cliente
+            # Formato atual do Tecnicon:
+            # Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente
             duplicata = partes[4]
             fornecedor_nome = partes[5]
             fornecedor = parse_money(partes[6])
             cliente = parse_money(partes[7])
 
-        # Compatibilidade com layouts antigos de 6 campos.
+        # Compatibilidade com formato antigo: 6 campos.
         else:
             while len(partes) < 6:
                 partes.append("")
@@ -139,8 +156,10 @@ def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
 
     df_result = pd.DataFrame(registros)
 
-    # O Tipo informado pelo Cubo é soberano. Quando vier vazio,
-    # usamos os valores como fallback para classificar a linha.
+    # Classificação final: CLIENTES, FORNECEDORES ou IMPOSTOS.
+    # Em linhas normais, o campo Tipo do Cubo é soberano. Se um novo bloco
+    # vier sem Tipo, usamos os valores somente como fallback para evitar que
+    # uma carteira/lançamento seja herdada incorretamente como CLIENTE.
     if not df_result.empty:
         df_result["Tipo"] = df_result["Tipo"].fillna("").astype(str).str.strip()
         tipo_upper = df_result["Tipo"].str.upper()
@@ -153,85 +172,6 @@ def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
     return df_result
 
 
-def ler_relatorio_saida(uploaded_file) -> pd.DataFrame:
-    """Lê o relatório 'DUPLICATAS DE FORNECEDORES A VENCER'.
-
-    Este arquivo é a fonte exclusiva das CONTAS À PAGAR/saídas.
-    O relatório é organizado por blocos 'VENCIMENTO: dd/mm/aaaa;' e
-    pode variar a quantidade de campos vazios antes dos três campos finais
-    de carteira/código/FL.
-    """
-    dados = uploaded_file.getvalue()
-    try:
-        raw = dados.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raw = dados.decode("cp1252", errors="replace")
-
-    if "DUPLICATAS DE FORNECEDORES A VENCER" not in raw.upper():
-        raise ValueError("O arquivo de saída não está no layout 'DUPLICATAS DE FORNECEDORES A VENCER'.")
-
-    registros = []
-    data_vencimento = pd.NaT
-
-    for linha in raw.splitlines():
-        linha = linha.strip()
-        if not linha:
-            continue
-
-        if linha.upper().startswith("VENCIMENTO:"):
-            valor_data = linha.split(":", 1)[1].strip().rstrip(";").strip()
-            parsed = parse_br_date(valor_data)
-            if not pd.isna(parsed):
-                data_vencimento = parsed
-            continue
-
-        partes = [p.strip() for p in linha.split(";")]
-        primeira = partes[0].upper() if partes else ""
-        if (
-            primeira.startswith("SOBERANA ALIMENTOS")
-            or primeira.startswith("DUPLICATAS DE FORNECEDORES")
-            or primeira.startswith("CODIGO")
-            or primeira.startswith("_ ")
-            or primeira.startswith("TOTAL VENCIMENTO")
-            or primeira == ""
-        ):
-            continue
-
-        while len(partes) < 6:
-            partes.append("")
-
-        fornecedor_nome = partes[2].strip()
-        duplicata = partes[3].strip()
-        valor = parse_money(partes[5])
-
-        finais = [p.strip() for p in partes[6:] if p.strip()]
-
-        if pd.isna(data_vencimento) or not fornecedor_nome or not duplicata or valor == 0:
-            continue
-
-        # PREVISÃO não possui carteira/código no relatório, mas é uma saída válida.
-        if duplicata.upper() == "PREVISAO":
-            registros.append({
-                "Carteira": "", "Código": "", "Data": data_vencimento,
-                "Tipo": "PREVISAO", "Fornecedor": fornecedor_nome,
-                "Duplicata": duplicata, "Valor Fornecedor": valor,
-                "Valor Cliente": 0.0, "Carteira Nome": "",
-            })
-            continue
-
-        if len(finais) < 3:
-            continue
-        carteira_codigo, carteira_nome, fl = finais[-3:]
-        registros.append({
-            "Carteira": carteira_codigo, "Código": carteira_codigo,
-            "Data": data_vencimento, "Tipo": "FORNECEDORES",
-            "Fornecedor": fornecedor_nome, "Duplicata": duplicata,
-            "Valor Fornecedor": valor, "Valor Cliente": 0.0,
-            "Carteira Nome": carteira_nome,
-        })
-
-    return pd.DataFrame(registros)
-
 def eh_cliente(tipo):
     return str(tipo).strip().upper().startswith("CLIENT")
 
@@ -242,14 +182,6 @@ def eh_fornecedor(tipo):
 
 def eh_imposto(tipo):
     return "IMPOSTOS" in str(tipo).strip().upper()
-
-
-def eh_previsao(tipo):
-    return str(tipo).strip().upper() == "PREVISAO"
-
-
-def eh_saida(tipo):
-    return eh_fornecedor(tipo) or eh_imposto(tipo) or eh_previsao(tipo)
 
 
 # ============================================================
@@ -337,14 +269,8 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
         axis=1,
     )
 
-    # Contas a pagar: sábado/domingo/feriado entram no próximo dia
-    # de compensação, exatamente como a previsão do painel.
-    work["Data Saída"] = work.apply(
-        lambda r: proxima_compensacao(
-            r["Data"], 0, sem_comp
-        ) if eh_saida(r["Tipo"]) else pd.NaT,
-        axis=1,
-    )
+    # Contas a pagar: data exata do lançamento.
+    work["Data Saída"] = work["Data"]
 
     # O leitor do CSV trabalha inicialmente com objetos `date`.
     # Antes de usar o acessador `.dt`, convertemos explicitamente as
@@ -586,7 +512,7 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
             work["Data Saída"].notna()
             & (work["Data Saída"].dt.normalize() == dia_ts)
             & (pd.to_numeric(work["Valor Fornecedor"], errors="coerce").fillna(0) != 0)
-            & work["Tipo"].map(eh_saida)
+            & (work["Tipo"].map(eh_fornecedor) | work["Tipo"].map(eh_imposto))
         ].copy()
 
         # Mantemos cada lançamento individualmente. Isso permite que as
@@ -654,9 +580,7 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
             f'=SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
             f'Detalhamento!$D:$D,"*FORNECED*")+'
             f'SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
-            f'Detalhamento!$D:$D,"*IMPOSTOS*")+'
-            f'SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
-            f'Detalhamento!$D:$D,"PREVISAO")'
+            f'Detalhamento!$D:$D,"*IMPOSTOS*")'
         )
         ws[f"{col}13"].number_format = '#,##0.00'
 
@@ -722,33 +646,15 @@ st.title("💰 Previsão Financeira")
 st.caption("Modelo baseado no layout da planilha de previsão utilizada atualmente.")
 
 with st.sidebar:
-    st.header("⚙️ Ferramentas")
-    st.caption("Tudo o que você precisa para montar a previsão está aqui.")
-
-    st.subheader("📥 Entrada de dados")
-    cubo_uploaded = st.file_uploader(
-        "CSV de recebimentos (Cubo)",
-        type=["csv"],
-        help="Arquivo Tecnicon no layout do Cubo, usado para CONTAS À RECEBER.",
-        key="csv_recebimentos",
-    )
-    saida_uploaded = st.file_uploader(
-        "CSV de saídas / fornecedores",
-        type=["csv"],
-        help="Arquivo Tecnicon 'DUPLICATAS DE FORNECEDORES A VENCER', usado para CONTAS À PAGAR.",
-        key="csv_saidas",
-    )
-
-    st.divider()
-    st.subheader("📅 Previsão")
+    st.header("Configuração da simulação")
     saldo_inicial = st.number_input("Saldo inicial", min_value=0.0, value=50000.0, step=100.0, format="%.2f")
     data_inicio = st.date_input(
-        "Data inicial",
+        "Data inicial da previsão",
         value=date.today() - timedelta(days=date.today().weekday()),
         format="DD/MM/YYYY",
     )
     data_fim = st.date_input(
-        "Data final",
+        "Data final da previsão",
         value=data_inicio + timedelta(days=4),
         format="DD/MM/YYYY",
     )
@@ -759,58 +665,114 @@ with st.sidebar:
         st.error("A previsão pode ter no máximo 5 dias para manter o layout do Excel.")
         st.stop()
 
-    with st.expander("💳 Carteiras / D+", expanded=False):
-        cfg_default = pd.DataFrame({"Carteira": ["100", "33", "102", "74"], "D+": [1, 1, 0, 1]})
-        config = st.data_editor(
-            cfg_default,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="config",
-            column_config={
-                "Carteira": st.column_config.TextColumn("Carteira"),
-                "D+": st.column_config.NumberColumn("D+", min_value=0, step=1),
-            },
-        )
-
-    with st.expander("📅 Feriados", expanded=False):
-        fer_default = pd.DataFrame({
-            "Data": pd.Series(dtype="datetime64[ns]"),
-            "Descrição": pd.Series(dtype="string"),
-        })
-        feriados = st.data_editor(
-            fer_default,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="feriados",
-            column_config={
-                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-                "Descrição": st.column_config.TextColumn("Descrição"),
-            },
-        )
-
-    # Espaço reservado para os downloads, preenchido depois do processamento.
     st.divider()
-    st.subheader("📤 Exportação")
-    download_area = st.empty()
+    st.subheader("Carteiras / D+")
+    cfg_default = pd.DataFrame({"Carteira": ["100", "33", "102", "74"], "D+": [1, 1, 0, 1]})
+    config = st.data_editor(
+        cfg_default,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="config",
+        column_config={
+            "Carteira": st.column_config.TextColumn("Carteira"),
+            "D+": st.column_config.NumberColumn("D+", min_value=0, step=1),
+        },
+    )
 
-if cubo_uploaded is None or saida_uploaded is None:
-    st.info("Carregue os dois arquivos: o Cubo para CONTAS À RECEBER e o relatório 'DUPLICATAS DE FORNECEDORES A VENCER' para CONTAS À PAGAR.")
-    st.stop()
+    st.divider()
+    st.subheader("Dias sem compensação")
+    fer_default = pd.DataFrame({
+        "Data": pd.Series(dtype="datetime64[ns]"),
+        "Descrição": pd.Series(dtype="string"),
+    })
+    feriados = st.data_editor(
+        fer_default,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="feriados",
+        column_config={
+            "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+            "Descrição": st.column_config.TextColumn("Descrição"),
+        },
+    )
+
+st.subheader("🔄 Atualização")
+col_atualizar, col_status = st.columns([1, 3])
+with col_atualizar:
+    atualizar = st.button("🔄 Atualizar Tecnicon", type="primary", use_container_width=True)
+
+if atualizar:
+    ini_txt = data_inicio.strftime("%d/%m/%Y")
+    fim_txt = data_fim.strftime("%d/%m/%Y")
+    script_atualizar = Path(__file__).with_name("atualizar_tecnicon.py")
+    if not script_atualizar.exists():
+        st.error("O robô de atualização não está instalado nesta pasta.")
+    else:
+        with st.spinner("Executando os dois robôs do Tecnicon... Faça o login quando o navegador abrir."):
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(script_atualizar), ini_txt, fim_txt],
+                    cwd=str(Path(__file__).parent), capture_output=True, text=True,
+                    timeout=1800,
+                )
+                st.session_state["ultimo_log_tecnicon"] = proc.stdout + "\n" + proc.stderr
+                st.session_state["atualizacao_ok"] = proc.returncode == 0
+            except subprocess.TimeoutExpired:
+                st.session_state["atualizacao_ok"] = False
+                st.session_state["ultimo_log_tecnicon"] = "Tempo limite de 30 minutos atingido."
+            except Exception as e:
+                st.session_state["atualizacao_ok"] = False
+                st.session_state["ultimo_log_tecnicon"] = str(e)
+        st.rerun()
+
+if st.session_state.get("ultimo_log_tecnicon"):
+    with st.expander("🧾 Log da última atualização", expanded=False):
+        st.code(st.session_state["ultimo_log_tecnicon"][-12000:])
+
+pasta_receber = Path(__file__).with_name("CSV_RECEBER")
+arquivos_receber = sorted(pasta_receber.glob("*.csv"), key=lambda p: p.stat().st_mtime) if pasta_receber.exists() else []
+
+uploaded = st.file_uploader("📥 Carregar CSV bruto manualmente (opcional)", type=["csv"])
 
 try:
-    df_cubo = ler_cubo_recebimentos(cubo_uploaded)
-    df_saida = ler_relatorio_saida(saida_uploaded)
+    if uploaded is not None:
+        df = ler_cubo_bruto(uploaded)
+        fonte_dados = "CSV enviado manualmente"
+    elif arquivos_receber:
+        partes_df = [ler_cubo_bruto(p) for p in arquivos_receber]
+        partes_df = [x for x in partes_df if not x.empty]
+        df = pd.concat(partes_df, ignore_index=True) if partes_df else pd.DataFrame()
+        fonte_dados = f"{len(arquivos_receber)} CSV(s) baixado(s) pelo robô"
+    else:
+        st.info("Clique em **Atualizar Tecnicon** para baixar os arquivos automaticamente, ou carregue um CSV manualmente.")
+        st.stop()
 except Exception as e:
     st.error(f"Erro ao ler os CSVs: {e}")
     st.stop()
 
-# O Cubo fornece recebimentos e impostos; o relatório de fornecedores
-# fornece as saídas. Assim evitamos duplicar contas a pagar do Cubo.
-df_cubo_receber = df_cubo[df_cubo["Tipo"].map(eh_cliente) | df_cubo["Tipo"].map(eh_imposto)].copy()
-df = pd.concat([df_cubo_receber, df_saida], ignore_index=True, sort=False)
+st.caption(f"📂 Fonte: {fonte_dados}")
+
+# O relatório de previsão de saída é mantido separado até validarmos o formato
+# real do CSV do Tecnicon. O arquivo já é detectado automaticamente após o botão
+# Atualizar e fica disponível para conferência sem contaminar a classificação
+# CLIENTES/FORNECEDORES do cubo de receber.
+pasta_saida = Path(__file__).with_name("CSV_PREVISAO_SAIDA")
+arquivos_saida = sorted(pasta_saida.glob("*.csv"), key=lambda p: p.stat().st_mtime) if pasta_saida.exists() else []
+if arquivos_saida:
+    ultimo_saida = arquivos_saida[-1]
+    st.success(f"📤 Previsão de saída encontrada: {ultimo_saida.name}")
+    with st.expander("👁️ Conferir arquivo de previsão de saída"):
+        try:
+            try:
+                df_saida = pd.read_csv(ultimo_saida, sep=";", encoding="utf-8-sig", dtype=str)
+            except Exception:
+                df_saida = pd.read_csv(ultimo_saida, sep=",", encoding="utf-8-sig", dtype=str)
+            st.dataframe(df_saida, use_container_width=True, height=320)
+        except Exception as e:
+            st.warning(f"O arquivo foi baixado, mas o formato ainda precisa ser ajustado para leitura: {e}")
 
 if df.empty:
-    st.error("Nenhum lançamento foi encontrado nos dois CSVs.")
+    st.error("Nenhum lançamento foi encontrado no CSV.")
     st.stop()
 
 # Configuração de D+
@@ -831,7 +793,46 @@ if "Data" in feriados.columns:
         except Exception:
             pass
 
-# D+ não cadastrado usa D+1 como padrão, sem alerta na interface.
+# ============================================================
+# Detecção automática de novas carteiras
+# ============================================================
+# Uma carteira é considerada "nova" quando aparece no CSV entre os
+# lançamentos de CLIENTES, mas seu código ainda não está cadastrado
+# na tabela Carteiras / D+.
+clientes_tmp = df[df["Tipo"].map(eh_cliente)].copy()
+clientes_tmp["Código"] = clientes_tmp["Código"].astype(str).str.strip()
+clientes_tmp["Carteira"] = clientes_tmp["Carteira"].astype(str).str.strip()
+
+configuradas = {str(k).strip() for k in map_d.keys() if str(k).strip()}
+novas_carteiras = (
+    clientes_tmp.loc[
+        (clientes_tmp["Código"] != "")
+        & (~clientes_tmp["Código"].isin(configuradas)),
+        ["Código", "Carteira"],
+    ]
+    .drop_duplicates()
+    .sort_values(["Carteira", "Código"], kind="stable")
+)
+
+if not novas_carteiras.empty:
+    st.warning(
+        "⚠️ Nova carteira encontrada no CSV. "
+        "Ela ainda não possui D+ cadastrado e será calculada provisoriamente com D+1."
+    )
+    aviso_novas = novas_carteiras.rename(
+        columns={"Código": "Código da carteira", "Carteira": "Nome da carteira"}
+    ).copy()
+    aviso_novas["D+ provisório"] = 1
+    st.dataframe(
+        aviso_novas[["Código da carteira", "Nome da carteira", "D+ provisório"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Para corrigir a regra, cadastre o código da carteira na tabela "
+        "'Carteiras / D+' da barra lateral e informe o D+ correto."
+    )
+
 df["D+"] = df["Código"].astype(str).str.strip().map(map_d).fillna(1).astype(int)
 
 df["Data Entrada"] = df.apply(
@@ -840,17 +841,10 @@ df["Data Entrada"] = df.apply(
     axis=1,
 )
 
-# CONTAS À PAGAR: se o vencimento cair em sábado, domingo ou feriado,
-# a saída entra no próximo dia de compensação (ex.: sábado/domingo -> segunda).
-# Isso evita perder pagamentos do fim de semana na previsão semanal.
-df["Data Saída"] = df.apply(
-    lambda r: proxima_compensacao(r["Data"], 0, sem_comp)
-    if eh_saida(r["Tipo"]) else pd.NaT,
-    axis=1,
-)
+df["Data Saída"] = df["Data"]
 
 receber = df[df["Tipo"].map(eh_cliente)].copy()
-pagar = df[df["Tipo"].map(eh_saida)].copy()
+pagar = df[df["Tipo"].map(eh_fornecedor)].copy()
 
 # Período exibido: exatamente o intervalo escolhido.
 segunda = data_inicio
@@ -863,11 +857,11 @@ nomes = [nomes_semana[d.weekday()] for d in dias]
 # ============================================================
 from html import escape
 
-DIAS_SEMANA_EXT = ["Segunda", "Terça", "Quarta", "Quinta",
-                    "Sexta", "Sábado", "Domingo"]
+DIAS_SEMANA_EXT = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira",
+                    "Sexta-feira", "Sábado", "Domingo"]
 
 def fmt_dia_semana(d):
-    """Ex.: '29/09 - Terça' — usado em toda tabela que exibe datas."""
+    """Ex.: '29/09 - Terça-feira' — usado em toda tabela que exibe datas."""
     d = pd.Timestamp(d)
     return f"{d.strftime('%d/%m')} - {DIAS_SEMANA_EXT[d.weekday()]}"
 
@@ -931,7 +925,7 @@ fornecedores_por_dia = []
 for d in dias:
     reg = pagar[
         pagar["Data Saída"].eq(d)
-        & pagar["Tipo"].map(eh_saida)
+        & (pagar["Tipo"].map(eh_fornecedor) | pagar["Tipo"].map(eh_imposto))
         & (pd.to_numeric(pagar["Valor Fornecedor"], errors="coerce").fillna(0) != 0)
     ].copy()
     if not reg.empty:
@@ -961,12 +955,8 @@ total_cols = len(dias) + 1
 rows_html.append(f'<tr class="titulo"><td colspan="{total_cols}">PREVISÃO FINANCEIRA SEMANAL</td></tr>')
 rows_html.append('<tr class="dias"><td></td>' + ''.join(f'<td>{fmt_dia_semana(dias[i])}</td>' for i in range(len(dias)) ) + '</tr>')
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
-rows_html.append(
-    '<tr class="saldo-inicial"><td>SALDO INICIAL</td>'
-    + f'<td class="num">{_fmt_num(saldo_inicial)}</td>'
-    + ''.join('<td></td>' for _ in range(max(0, len(dias) - 1)))
-    + '</tr>'
-)
+rows_html.append('<tr class="secao"><td colspan="{total_cols}">SALDO INICIAL</td></tr>')
+rows_html.append('<tr class="linha"><td></td><td class="num">' + _fmt_num(saldo_inicial) + '</td><td></td><td></td><td></td><td></td></tr>')
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
 rows_html.append('<tr class="secao"><td>CONTAS À RECEBER</td>' + ''.join(f'<td class="num">{_fmt_num(v)}</td>' for v in recv_by_day) + '</tr>')
 for carteira in carteiras_recebimento:
@@ -986,24 +976,19 @@ rows_html.append(f'<tr class="secao"><td colspan="{total_cols}">CONTAS À PAGAR<
 for idx, d in enumerate(dias):
     reg = fornecedores_por_dia[idx]
     rows_html.append(f'<tr class="data"><td>{fmt_dia_semana(d)}</td><td colspan="{max(1, total_cols-1)}"></td></tr>')
-    # A tabela de detalhes usa sempre a mesma coluna de valor, independentemente
-    # do dia. Assim os números não ficam pulando de uma coluna para outra.
-    valor_colspan = max(1, total_cols - 2)
-    rows_html.append(
-        f'<tr class="cabecalho-mini"><td>Duplicata</td>'
-        f'<td colspan="{valor_colspan}">Nome</td><td>Valor</td></tr>'
-    )
+    rows_html.append('<tr class="cabecalho-mini"><td>Duplicata</td><td>Nome</td><td colspan="3">Valor</td><td></td></tr>')
     for _, r in reg.iterrows():
+        vals = [''] * 5
+        vals[idx] = _fmt_num(r["Valor Fornecedor"])
         rows_html.append(
             f'<tr class="fornecedor"><td>{escape(str(r["Duplicata"]))}</td>'
-            f'<td colspan="{valor_colspan}">{escape(str(r["Nome Exibicao"]).strip() or "(sem nome)")}</td>'
-            f'<td class="num">{_fmt_num(r["Valor Fornecedor"])}</td></tr>'
+            f'<td>{escape(str(r["Nome Exibicao"]).strip() or "(sem nome)")}</td>'
+            f'<td colspan="3" class="num">{vals[idx]}</td><td></td></tr>'
         )
     total = float(reg["Valor Fornecedor"].sum()) if not reg.empty else 0.0
-    rows_html.append(
-        f'<tr class="total"><td>Total</td><td colspan="{valor_colspan}"></td>'
-        f'<td class="num">{_fmt_num(total)}</td></tr>'
-    )
+    vals = [''] * 5
+    vals[idx] = _fmt_num(total)
+    rows_html.append('<tr class="total"><td>Total</td>' + ''.join(f'<td class="num">{v}</td>' for v in vals) + '</tr>')
 
 rows_html.append(f'<tr class="espaco"><td colspan="{total_cols}"></td></tr>')
 
@@ -1018,8 +1003,6 @@ html = f'''
 .previsao .dias td {{ text-align:center; font-weight:700; border-bottom:1px solid #222; }}
 .previsao .dias span {{ font-weight:400; }}
 .previsao .secao td {{ font-weight:700; border-bottom:1px solid #222; padding-top:7px; }}
-.previsao .saldo-inicial td {{ font-weight:700; border-bottom:1px solid #222; padding:7px 8px; }}
-.previsao .saldo-inicial .num {{ text-align:right; }}
 .previsao .sub td {{ border:0; }}
 .previsao .saldo td {{ font-weight:700; border-top:1px solid #222; border-bottom:1px solid #222; padding:6px 8px; }}
 .previsao .data td {{ font-weight:700; padding-top:10px; border-bottom:1px solid #222; }}
@@ -1038,18 +1021,17 @@ st.divider()
 
 st.subheader("🔎 Detalhamento do cálculo")
 det = df[["Data", "Carteira", "Código", "Tipo", "D+", "Valor Cliente", "Data Entrada", "Valor Fornecedor", "Data Saída", "Duplicata", "Fornecedor"]].copy()
-det["Classificação"] = det["Tipo"].map(lambda x: "Cliente" if eh_cliente(x) else ("Imposto" if eh_imposto(x) else ("A pagar" if eh_saida(x) else "Não classificado")))
+det["Classificação"] = det["Tipo"].map(lambda x: "Cliente" if eh_cliente(x) else ("A pagar" if eh_fornecedor(x) else ("Imposto" if eh_imposto(x) else "Não classificado")))
 det.columns = ["Data bruto", "Carteira", "Código", "Tipo", "D+", "Cliente", "Entrada no banco", "A pagar", "Saída", "Duplicata", "Fornecedor", "Classificação"]
 st.dataframe(det.sort_values(["Data bruto", "Carteira"]), use_container_width=True, hide_index=True)
 
 # Downloads
 excel_bytes = gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=data_fim)
-download_area.download_button(
+st.download_button(
     "📊 Baixar previsão em Excel",
     data=excel_bytes,
     file_name=f"Previsao_Financeira_{data_inicio.strftime('%Y%m%d')}_{data_fim.strftime('%Y%m%d')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
 )
 
 csv_result = pd.DataFrame({
@@ -1059,10 +1041,9 @@ csv_result = pd.DataFrame({
     "Saldo": saldos,
 })
 csv_bytes = csv_result.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
-download_area.download_button(
+st.download_button(
     "📄 Baixar resultado CSV",
     data=csv_bytes,
     file_name=f"Previsao_Financeira_{data_inicio.strftime('%Y%m%d')}_{data_fim.strftime('%Y%m%d')}.csv",
     mime="text/csv",
-    use_container_width=True,
 )

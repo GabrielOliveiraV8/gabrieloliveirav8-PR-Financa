@@ -135,6 +135,39 @@ def preencher_datas_saida(page, ini, fim):
     time.sleep(1)
 
 
+def selecionar_somente_a_pagar(page):
+    """Na tela do relatório, seleciona explicitamente 'Somente a Pagar'."""
+    print("[PARÂMETROS] Selecionando 'Somente a Pagar'.")
+    textos = page.get_by_text("Somente a Pagar", exact=True)
+    if not textos.count():
+        textos = page.get_by_text("Somente a Pagar", exact=False)
+    if not textos.count():
+        raise RuntimeError("Opção 'Somente a Pagar' não encontrada.")
+
+    alvo = textos.last
+    # Primeiro tenta encontrar o radio associado ao rótulo.
+    for expr in [
+        "xpath=preceding::input[@type='radio'][1]",
+        "xpath=following::input[@type='radio'][1]",
+        "xpath=ancestor::*[self::div or self::td][1]//input[@type='radio']",
+    ]:
+        try:
+            radio = alvo.locator(expr)
+            if radio.count():
+                radio.first.check(force=True)
+                if radio.first.is_checked():
+                    return True
+        except Exception:
+            continue
+
+    # Fallback: clicar diretamente no texto/rótulo.
+    try:
+        alvo.click(timeout=10000, force=True)
+        return True
+    except Exception as e:
+        raise RuntimeError(f"Não consegui selecionar 'Somente a Pagar': {e}")
+
+
 def marcar_previsao_saida(page):
     print("[PARÂMETROS] Garantindo 'Vencimento Programado' e 'Imprimir Previsão de Saída'.")
 
@@ -317,6 +350,7 @@ def executar(ini, fim):
             abrir_relatorio_saida(page)
             abrir_parametros_saida(page)
 
+            selecionar_somente_a_pagar(page)
             preencher_datas_saida(page, ini, fim)
             marcar_previsao_saida(page)
             selecionar_filiais(page, "1", "3")
