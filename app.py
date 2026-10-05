@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -696,80 +697,142 @@ with st.sidebar:
         },
     )
 
-st.subheader("🔄 Atualização")
-col_atualizar, col_status = st.columns([1, 3])
-with col_atualizar:
-    atualizar = st.button("🔄 Atualizar Tecnicon", type="primary", use_container_width=True)
+# ============================================================
+# Atualização / entrada dos dois relatórios
+# ============================================================
 
-if atualizar:
-    ini_txt = data_inicio.strftime("%d/%m/%Y")
-    fim_txt = data_fim.strftime("%d/%m/%Y")
-    script_atualizar = Path(__file__).with_name("atualizar_tecnicon.py")
-    if not script_atualizar.exists():
-        st.error("O robô de atualização não está instalado nesta pasta.")
-    else:
-        with st.spinner("Executando os dois robôs do Tecnicon... Faça o login quando o navegador abrir."):
-            try:
-                proc = subprocess.run(
-                    [sys.executable, str(script_atualizar), ini_txt, fim_txt],
-                    cwd=str(Path(__file__).parent), capture_output=True, text=True,
-                    timeout=1800,
-                )
-                st.session_state["ultimo_log_tecnicon"] = proc.stdout + "\n" + proc.stderr
-                st.session_state["atualizacao_ok"] = proc.returncode == 0
-            except subprocess.TimeoutExpired:
-                st.session_state["atualizacao_ok"] = False
-                st.session_state["ultimo_log_tecnicon"] = "Tempo limite de 30 minutos atingido."
-            except Exception as e:
-                st.session_state["atualizacao_ok"] = False
-                st.session_state["ultimo_log_tecnicon"] = str(e)
-        st.rerun()
+# O robô Playwright precisa abrir um navegador na máquina onde o Streamlit
+# está sendo executado. Isso funciona no Windows/local, mas não no Streamlit
+# Community Cloud. Por isso mantemos o mesmo botão no menu lateral e, no
+# ambiente online, os dois CSVs podem ser enviados manualmente para teste.
+MODO_LOCAL = os.name == "nt"
 
-if st.session_state.get("ultimo_log_tecnicon"):
-    with st.expander("🧾 Log da última atualização", expanded=False):
-        st.code(st.session_state["ultimo_log_tecnicon"][-12000:])
+with st.sidebar:
+    st.divider()
+    st.subheader("🔄 Atualização")
+    atualizar = st.button(
+        "🔄 Atualizar Tecnicon",
+        type="primary",
+        use_container_width=True,
+        help="No Windows/local, abre o Tecnicon e executa os dois robôs.",
+    )
+
+    if atualizar:
+        if not MODO_LOCAL:
+            st.warning(
+                "A automação do Tecnicon não pode abrir o navegador no Streamlit Online. "
+                "Use os dois campos de CSV abaixo para testar online ou execute o app localmente no Windows."
+            )
+        else:
+            ini_txt = data_inicio.strftime("%d/%m/%Y")
+            fim_txt = data_fim.strftime("%d/%m/%Y")
+            script_atualizar = Path(__file__).with_name("atualizar_tecnicon.py")
+            if not script_atualizar.exists():
+                st.error("O robô de atualização não está instalado nesta pasta.")
+            else:
+                with st.spinner("Abrindo o Tecnicon e executando os dois robôs... Faça o login quando o navegador abrir."):
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, str(script_atualizar), ini_txt, fim_txt],
+                            cwd=str(Path(__file__).parent),
+                            capture_output=True,
+                            text=True,
+                            timeout=1800,
+                        )
+                        st.session_state["ultimo_log_tecnicon"] = proc.stdout + "\n" + proc.stderr
+                        st.session_state["atualizacao_ok"] = proc.returncode == 0
+                    except subprocess.TimeoutExpired:
+                        st.session_state["atualizacao_ok"] = False
+                        st.session_state["ultimo_log_tecnicon"] = "Tempo limite de 30 minutos atingido."
+                    except Exception as e:
+                        st.session_state["atualizacao_ok"] = False
+                        st.session_state["ultimo_log_tecnicon"] = str(e)
+                st.rerun()
+
+    if st.session_state.get("ultimo_log_tecnicon"):
+        with st.expander("🧾 Log da última atualização", expanded=False):
+            st.code(st.session_state["ultimo_log_tecnicon"][-12000:])
 
 pasta_receber = Path(__file__).with_name("CSV_RECEBER")
 arquivos_receber = sorted(pasta_receber.glob("*.csv"), key=lambda p: p.stat().st_mtime) if pasta_receber.exists() else []
+pasta_saida = Path(__file__).with_name("CSV_PREVISAO_SAIDA")
+arquivos_saida = sorted(pasta_saida.glob("*.csv"), key=lambda p: p.stat().st_mtime) if pasta_saida.exists() else []
 
-uploaded = st.file_uploader("📥 Carregar CSV bruto manualmente (opcional)", type=["csv"])
+st.subheader("📥 Arquivos do Tecnicon")
+col_rec, col_saida = st.columns(2)
+with col_rec:
+    uploaded_receber = st.file_uploader(
+        "CSV de CONTAS A RECEBER",
+        type=["csv"],
+        key="csv_receber_manual",
+        help="Arquivo gerado pelo robô/relatório de recebimentos.",
+    )
+with col_saida:
+    uploaded_saida = st.file_uploader(
+        "CSV de PREVISÃO DE SAÍDA",
+        type=["csv"],
+        key="csv_saida_manual",
+        help="Arquivo A Pagar/Vencer com 'Imprimir Previsão de Saída'.",
+    )
+
+# Compatibilidade com arquivos baixados automaticamente pelo robô.
 
 try:
-    if uploaded is not None:
-        df = ler_cubo_bruto(uploaded)
-        fonte_dados = "CSV enviado manualmente"
+    # RECEBER
+    if uploaded_receber is not None:
+        df = ler_cubo_bruto(uploaded_receber)
+        fonte_dados = "CSV de receber enviado manualmente"
     elif arquivos_receber:
         partes_df = [ler_cubo_bruto(p) for p in arquivos_receber]
         partes_df = [x for x in partes_df if not x.empty]
         df = pd.concat(partes_df, ignore_index=True) if partes_df else pd.DataFrame()
-        fonte_dados = f"{len(arquivos_receber)} CSV(s) baixado(s) pelo robô"
+        fonte_dados = f"{len(arquivos_receber)} CSV(s) de receber baixado(s) pelo robô"
     else:
-        st.info("Clique em **Atualizar Tecnicon** para baixar os arquivos automaticamente, ou carregue um CSV manualmente.")
-        st.stop()
+        df = pd.DataFrame()
+        fonte_dados = "Nenhum CSV de receber carregado"
 except Exception as e:
-    st.error(f"Erro ao ler os CSVs: {e}")
+    st.error(f"Erro ao ler o CSV de receber: {e}")
     st.stop()
 
-st.caption(f"📂 Fonte: {fonte_dados}")
+st.caption(f"📂 {fonte_dados}")
 
-# O relatório de previsão de saída é mantido separado até validarmos o formato
-# real do CSV do Tecnicon. O arquivo já é detectado automaticamente após o botão
-# Atualizar e fica disponível para conferência sem contaminar a classificação
-# CLIENTES/FORNECEDORES do cubo de receber.
-pasta_saida = Path(__file__).with_name("CSV_PREVISAO_SAIDA")
-arquivos_saida = sorted(pasta_saida.glob("*.csv"), key=lambda p: p.stat().st_mtime) if pasta_saida.exists() else []
-if arquivos_saida:
+# PREVISÃO DE SAÍDA
+# Ainda mostramos o arquivo completo para validação do layout real do Tecnicon.
+# A integração financeira definitiva da previsão de saída será aplicada depois
+# que o primeiro CSV real for validado.
+ultimo_saida = None
+if uploaded_saida is not None:
+    try:
+        raw_saida = uploaded_saida.getvalue()
+        try:
+            df_saida = pd.read_csv(io.BytesIO(raw_saida), sep=";", encoding="utf-8-sig", dtype=str)
+        except Exception:
+            df_saida = pd.read_csv(io.BytesIO(raw_saida), sep=",", encoding="utf-8-sig", dtype=str)
+        st.success("📤 CSV de previsão de saída carregado.")
+    except Exception as e:
+        df_saida = pd.DataFrame()
+        st.warning(f"Não foi possível interpretar o CSV de previsão de saída: {e}")
+elif arquivos_saida:
     ultimo_saida = arquivos_saida[-1]
     st.success(f"📤 Previsão de saída encontrada: {ultimo_saida.name}")
-    with st.expander("👁️ Conferir arquivo de previsão de saída"):
+    try:
         try:
-            try:
-                df_saida = pd.read_csv(ultimo_saida, sep=";", encoding="utf-8-sig", dtype=str)
-            except Exception:
-                df_saida = pd.read_csv(ultimo_saida, sep=",", encoding="utf-8-sig", dtype=str)
-            st.dataframe(df_saida, use_container_width=True, height=320)
-        except Exception as e:
-            st.warning(f"O arquivo foi baixado, mas o formato ainda precisa ser ajustado para leitura: {e}")
+            df_saida = pd.read_csv(ultimo_saida, sep=";", encoding="utf-8-sig", dtype=str)
+        except Exception:
+            df_saida = pd.read_csv(ultimo_saida, sep=",", encoding="utf-8-sig", dtype=str)
+    except Exception as e:
+        df_saida = pd.DataFrame()
+        st.warning(f"O arquivo foi baixado, mas o formato ainda precisa ser ajustado para leitura: {e}")
+else:
+    df_saida = pd.DataFrame()
+
+if not df_saida.empty:
+    with st.expander("👁️ Conferir previsão de saída", expanded=False):
+        st.dataframe(df_saida, use_container_width=True, height=320)
+
+if df.empty:
+    st.info("Carregue o **CSV de CONTAS A RECEBER** para montar a previsão. O CSV de previsão de saída pode ser carregado no segundo campo.")
+    st.stop()
 
 if df.empty:
     st.error("Nenhum lançamento foi encontrado no CSV.")
