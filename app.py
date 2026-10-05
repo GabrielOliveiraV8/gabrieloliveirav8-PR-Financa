@@ -45,22 +45,121 @@ def parse_br_date(v):
 # As linhas seguintes podem deixar carteira/código em branco.
 # ============================================================
 
-def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
+def ler_cubo_recebimentos(uploaded_file) -> pd.DataFrame:
+    """Lê o Cubo Financeiro usado para CONTAS À RECEBER.
+
+    Formato observado:
+      Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;
+      Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente;
+
+    As linhas seguintes podem deixar carteira/código/data/tipo em branco.
     """
-    Lê o layout atual do relatório Tecnicon:
+    dados = uploaded_file.getvalue()
+    try:
+        raw = dados.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raw = dados.decode("cp1252", errors="replace")
 
-    DUPLICATAS DE FORNECEDORES A VENCER
-    CODIGO;FL;FORNECEDOR;DUPLICATA;PARCELA;VALOR;IRRF NF;
-    VLR EM MOEDA;CODIGO;CARTEIRA;FL
+    registros = []
+    carteira = ""
+    codigo = ""
+    tipo = ""
+    data_atual = pd.NaT
 
-    O relatório é organizado em blocos por "VENCIMENTO: dd/mm/aaaa;".
-    A data vale para todas as linhas de lançamento seguintes até o próximo
-    bloco. O Tecnicon pode omitir campos vazios, então os três últimos
-    campos preenchidos são usados para identificar código da carteira,
-    nome da carteira e FL.
+    for linha in raw.splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
 
-    A tela da previsão continua usando exatamente o mesmo formato; este
-    leitor apenas normaliza o arquivo para o formato interno do sistema.
+        partes = [p.strip() for p in linha.split(";")]
+        n_campos_original = len(partes)
+        while partes and partes[-1] == "":
+            partes.pop()
+
+        if partes and "CarteiraCód." in partes[0]:
+            continue
+
+        # Layout atual do Cubo: 8 campos.
+        if n_campos_original >= 8:
+            while len(partes) < 8:
+                partes.append("")
+
+            if partes[0]:
+                carteira = partes[0]
+                codigo = partes[1]
+                tipo = partes[3].strip() if partes[3].strip() else ""
+
+            if partes[2]:
+                parsed = parse_br_date(partes[2])
+                if not pd.isna(parsed):
+                    data_atual = parsed
+
+            if pd.isna(data_atual):
+                continue
+
+            # Ordem real do Cubo: Duplicata; Cliente/Fornecedor; Valor Fornecedor; Valor Cliente
+            duplicata = partes[4]
+            fornecedor_nome = partes[5]
+            fornecedor = parse_money(partes[6])
+            cliente = parse_money(partes[7])
+
+        # Compatibilidade com layouts antigos de 6 campos.
+        else:
+            while len(partes) < 6:
+                partes.append("")
+
+            if partes[0]:
+                carteira = partes[0]
+                codigo = partes[1]
+                tipo = partes[3].strip() if partes[3].strip() else ""
+
+            if partes[2]:
+                parsed = parse_br_date(partes[2])
+                if not pd.isna(parsed):
+                    data_atual = parsed
+
+            if pd.isna(data_atual):
+                continue
+
+            fornecedor_nome = ""
+            duplicata = ""
+            fornecedor = parse_money(partes[4])
+            cliente = parse_money(partes[5])
+
+        registros.append({
+            "Carteira": carteira,
+            "Código": codigo,
+            "Data": data_atual,
+            "Tipo": tipo,
+            "Fornecedor": fornecedor_nome,
+            "Duplicata": duplicata,
+            "Valor Fornecedor": fornecedor,
+            "Valor Cliente": cliente,
+        })
+
+    df_result = pd.DataFrame(registros)
+
+    # O Tipo informado pelo Cubo é soberano. Quando vier vazio,
+    # usamos os valores como fallback para classificar a linha.
+    if not df_result.empty:
+        df_result["Tipo"] = df_result["Tipo"].fillna("").astype(str).str.strip()
+        tipo_upper = df_result["Tipo"].str.upper()
+        desconhecido = ~tipo_upper.str.startswith(("CLIENT", "FORNECED", "IMPOSTOS"))
+        fornecedor_pos = pd.to_numeric(df_result["Valor Fornecedor"], errors="coerce").fillna(0) > 0
+        cliente_pos = pd.to_numeric(df_result["Valor Cliente"], errors="coerce").fillna(0) > 0
+        df_result.loc[desconhecido & fornecedor_pos & ~cliente_pos, "Tipo"] = "FORNECEDORES"
+        df_result.loc[desconhecido & cliente_pos & ~fornecedor_pos, "Tipo"] = "CLIENTES"
+
+    return df_result
+
+
+def ler_relatorio_saida(uploaded_file) -> pd.DataFrame:
+    """Lê o relatório 'DUPLICATAS DE FORNECEDORES A VENCER'.
+
+    Este arquivo é a fonte exclusiva das CONTAS À PAGAR/saídas.
+    O relatório é organizado por blocos 'VENCIMENTO: dd/mm/aaaa;' e
+    pode variar a quantidade de campos vazios antes dos três campos finais
+    de carteira/código/FL.
     """
     dados = uploaded_file.getvalue()
     try:
@@ -69,9 +168,7 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
         raw = dados.decode("cp1252", errors="replace")
 
     if "DUPLICATAS DE FORNECEDORES A VENCER" not in raw.upper():
-        raise ValueError(
-            "O arquivo não está no layout atual 'DUPLICATAS DE FORNECEDORES A VENCER'."
-        )
+        raise ValueError("O arquivo de saída não está no layout 'DUPLICATAS DE FORNECEDORES A VENCER'.")
 
     registros = []
     data_vencimento = pd.NaT
@@ -90,21 +187,16 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
 
         partes = [p.strip() for p in linha.split(";")]
         primeira = partes[0].upper() if partes else ""
-
-        # Cabeçalhos, separadores, títulos e totais não são lançamentos.
         if (
             primeira.startswith("SOBERANA ALIMENTOS")
             or primeira.startswith("DUPLICATAS DE FORNECEDORES")
             or primeira.startswith("CODIGO")
-            or primeira.startswith("_")
+            or primeira.startswith("_ ")
             or primeira.startswith("TOTAL VENCIMENTO")
             or primeira == ""
         ):
             continue
 
-        # O layout atual possui 11 campos, mas campos vazios podem fazer o
-        # Tecnicon deslocar os campos finais. Mantemos as posições iniciais
-        # fixas e identificamos carteira/código/FL pelo final preenchido.
         while len(partes) < 6:
             partes.append("")
 
@@ -118,9 +210,7 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
 
         carteira_codigo, carteira_nome, fl = finais[-3:]
 
-        if pd.isna(data_vencimento):
-            continue
-        if not fornecedor_nome or not duplicata or valor == 0:
+        if pd.isna(data_vencimento) or not fornecedor_nome or not duplicata or valor == 0:
             continue
 
         registros.append({
@@ -136,7 +226,6 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
         })
 
     return pd.DataFrame(registros)
-
 
 def eh_cliente(tipo):
     return str(tipo).strip().upper().startswith("CLIENT")
@@ -616,7 +705,18 @@ with st.sidebar:
     st.caption("Tudo o que você precisa para montar a previsão está aqui.")
 
     st.subheader("📥 Entrada de dados")
-    uploaded = st.file_uploader("Carregar CSV bruto", type=["csv"], help="Selecione o relatório Tecnicon: DUPLICATAS DE FORNECEDORES A VENCER.")
+    cubo_uploaded = st.file_uploader(
+        "CSV de recebimentos (Cubo)",
+        type=["csv"],
+        help="Arquivo Tecnicon no layout do Cubo, usado para CONTAS À RECEBER.",
+        key="csv_recebimentos",
+    )
+    saida_uploaded = st.file_uploader(
+        "CSV de saídas / fornecedores",
+        type=["csv"],
+        help="Arquivo Tecnicon 'DUPLICATAS DE FORNECEDORES A VENCER', usado para CONTAS À PAGAR.",
+        key="csv_saidas",
+    )
 
     st.divider()
     st.subheader("📅 Previsão")
@@ -672,18 +772,24 @@ with st.sidebar:
     st.subheader("📤 Exportação")
     download_area = st.empty()
 
-if uploaded is None:
-    st.info("Carregue o relatório de previsão de saída para gerar a previsão. Sem arquivo, o sistema mostra somente a estrutura.")
+if cubo_uploaded is None or saida_uploaded is None:
+    st.info("Carregue os dois arquivos: o Cubo para CONTAS À RECEBER e o relatório 'DUPLICATAS DE FORNECEDORES A VENCER' para CONTAS À PAGAR.")
     st.stop()
 
 try:
-    df = ler_cubo_bruto(uploaded)
+    df_cubo = ler_cubo_recebimentos(cubo_uploaded)
+    df_saida = ler_relatorio_saida(saida_uploaded)
 except Exception as e:
-    st.error(f"Erro ao ler o CSV: {e}")
+    st.error(f"Erro ao ler os CSVs: {e}")
     st.stop()
 
+# O Cubo fornece recebimentos e impostos; o relatório de fornecedores
+# fornece as saídas. Assim evitamos duplicar contas a pagar do Cubo.
+df_cubo_receber = df_cubo[df_cubo["Tipo"].map(eh_cliente) | df_cubo["Tipo"].map(eh_imposto)].copy()
+df = pd.concat([df_cubo_receber, df_saida], ignore_index=True, sort=False)
+
 if df.empty:
-    st.error("Nenhum lançamento foi encontrado no CSV.")
+    st.error("Nenhum lançamento foi encontrado nos dois CSVs.")
     st.stop()
 
 # Configuração de D+
