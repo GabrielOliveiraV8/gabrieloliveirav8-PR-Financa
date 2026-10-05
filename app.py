@@ -47,18 +47,20 @@ def parse_br_date(v):
 
 def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
     """
-    Lê automaticamente os dois layouts de saída encontrados no Tecnicon:
+    Lê o layout atual do relatório Tecnicon:
 
-    1) Cubo financeiro atual:
-       Carteira;Cód. Carteira;Data Vencimento;Tipo Carteira;
-       Duplicata;Cliente/Fornecedor;Valor Fornecedor;Valor Cliente
+    DUPLICATAS DE FORNECEDORES A VENCER
+    CODIGO;FL;FORNECEDOR;DUPLICATA;PARCELA;VALOR;IRRF NF;
+    VLR EM MOEDA;CODIGO;CARTEIRA;FL
 
-    2) Relatório "DUPLICATAS DE FORNECEDORES A VENCER":
-       CODIGO;FL;FORNECEDOR;DUPLICATA;PARCELA;VALOR;IRRF NF;
-       VLR EM MOEDA;CODIGO;CARTEIRA;FL
+    O relatório é organizado em blocos por "VENCIMENTO: dd/mm/aaaa;".
+    A data vale para todas as linhas de lançamento seguintes até o próximo
+    bloco. O Tecnicon pode omitir campos vazios, então os três últimos
+    campos preenchidos são usados para identificar código da carteira,
+    nome da carteira e FL.
 
-    O segundo layout usa blocos "VENCIMENTO: dd/mm/aaaa;". A data é
-    herdada pelas linhas seguintes até aparecer um novo vencimento.
+    A tela da previsão continua usando exatamente o mesmo formato; este
+    leitor apenas normaliza o arquivo para o formato interno do sistema.
     """
     dados = uploaded_file.getvalue()
     try:
@@ -66,170 +68,74 @@ def ler_cubo_bruto(uploaded_file) -> pd.DataFrame:
     except UnicodeDecodeError:
         raw = dados.decode("cp1252", errors="replace")
 
-    # ------------------------------------------------------------
-    # Layout 2: DUPLICATAS DE FORNECEDORES A VENCER
-    # ------------------------------------------------------------
-    if "DUPLICATAS DE FORNECEDORES A VENCER" in raw.upper():
-        registros = []
-        data_vencimento = pd.NaT
+    if "DUPLICATAS DE FORNECEDORES A VENCER" not in raw.upper():
+        raise ValueError(
+            "O arquivo não está no layout atual 'DUPLICATAS DE FORNECEDORES A VENCER'."
+        )
 
-        for linha in raw.splitlines():
-            linha = linha.strip()
-            if not linha:
-                continue
-
-            # Ex.: VENCIMENTO: 09/09/2026;
-            if linha.upper().startswith("VENCIMENTO:"):
-                valor_data = linha.split(":", 1)[1].strip().rstrip(";").strip()
-                parsed = parse_br_date(valor_data)
-                if not pd.isna(parsed):
-                    data_vencimento = parsed
-                continue
-
-            partes = [p.strip() for p in linha.split(";")]
-            if not partes:
-                continue
-
-            primeira = partes[0].upper()
-            # Ignora títulos, cabeçalhos, separadores e totais.
-            if (
-                primeira.startswith("SOBERANA ALIMENTOS")
-                or primeira.startswith("DUPLICATAS DE FORNECEDORES")
-                or primeira.startswith("CODIGO")
-                or primeira.startswith("_")
-                or primeira.startswith("TOTAL VENCIMENTO")
-            ):
-                continue
-
-            while len(partes) < 11:
-                partes.append("")
-
-            # Uma linha de lançamento possui fornecedor + duplicata + valor.
-            # O Tecnicon pode omitir o campo "VLR EM MOEDA" quando ele está
-            # vazio. Por isso, as posições finais são lidas pelo conteúdo: os
-            # três últimos campos não vazios são CODIGO, CARTEIRA e FL.
-            fornecedor_nome = partes[2]
-            duplicata = partes[3]
-            valor = parse_money(partes[5])
-
-            finais = [p for p in partes[6:] if p.strip()]
-            if len(finais) < 3:
-                continue
-            carteira_codigo, carteira_nome, _fl = finais[-3:]
-
-            if pd.isna(data_vencimento):
-                continue
-            if not fornecedor_nome or not duplicata:
-                continue
-            if valor == 0:
-                continue
-
-            registros.append({
-                "Carteira": carteira_codigo,
-                "Código": carteira_codigo,
-                "Data": data_vencimento,
-                "Tipo": "FORNECEDORES",
-                "Fornecedor": fornecedor_nome,
-                "Duplicata": duplicata,
-                "Valor Fornecedor": valor,
-                "Valor Cliente": 0.0,
-                "Carteira Nome": carteira_nome,
-            })
-
-        return pd.DataFrame(registros)
-
-    # ------------------------------------------------------------
-    # Layout 1: Cubo financeiro atual / antigo
-    # ------------------------------------------------------------
     registros = []
-    carteira = ""
-    codigo = ""
-    tipo = ""
-    data_atual = pd.NaT
-    duplicata = ""
+    data_vencimento = pd.NaT
 
     for linha in raw.splitlines():
         linha = linha.strip()
         if not linha:
             continue
 
-        partes = [p.strip() for p in linha.split(";")]
-        n_campos_original = len(partes)
-
-        while len(partes) > 0 and partes[-1] == "":
-            partes.pop()
-
-        if partes and "CarteiraCód." in partes[0]:
+        if linha.upper().startswith("VENCIMENTO:"):
+            valor_data = linha.split(":", 1)[1].strip().rstrip(";").strip()
+            parsed = parse_br_date(valor_data)
+            if not pd.isna(parsed):
+                data_vencimento = parsed
             continue
 
-        if n_campos_original >= 8:
-            while len(partes) < 8:
-                partes.append("")
+        partes = [p.strip() for p in linha.split(";")]
+        primeira = partes[0].upper() if partes else ""
 
-            novo_bloco = bool(partes[0])
-            if novo_bloco:
-                carteira = partes[0]
-                codigo = partes[1]
-                tipo = partes[3].strip() if partes[3].strip() else ""
+        # Cabeçalhos, separadores, títulos e totais não são lançamentos.
+        if (
+            primeira.startswith("SOBERANA ALIMENTOS")
+            or primeira.startswith("DUPLICATAS DE FORNECEDORES")
+            or primeira.startswith("CODIGO")
+            or primeira.startswith("_")
+            or primeira.startswith("TOTAL VENCIMENTO")
+            or primeira == ""
+        ):
+            continue
 
-            if partes[2]:
-                parsed = parse_br_date(partes[2])
-                if not pd.isna(parsed):
-                    data_atual = parsed
+        # O layout atual possui 11 campos, mas campos vazios podem fazer o
+        # Tecnicon deslocar os campos finais. Mantemos as posições iniciais
+        # fixas e identificamos carteira/código/FL pelo final preenchido.
+        while len(partes) < 6:
+            partes.append("")
 
-            if pd.isna(data_atual):
-                continue
+        fornecedor_nome = partes[2].strip()
+        duplicata = partes[3].strip()
+        valor = parse_money(partes[5])
 
-            duplicata = partes[4]
-            fornecedor_nome = partes[5]
-            fornecedor = parse_money(partes[6])
-            cliente = parse_money(partes[7])
+        finais = [p.strip() for p in partes[6:] if p.strip()]
+        if len(finais) < 3:
+            continue
 
-        else:
-            while len(partes) < 6:
-                partes.append("")
+        carteira_codigo, carteira_nome, fl = finais[-3:]
 
-            if partes[0]:
-                carteira = partes[0]
-                codigo = partes[1]
-                tipo = partes[3].strip() if partes[3].strip() else ""
-
-            if partes[2]:
-                parsed = parse_br_date(partes[2])
-                if not pd.isna(parsed):
-                    data_atual = parsed
-
-            if pd.isna(data_atual):
-                continue
-
-            fornecedor_nome = ""
-            duplicata = ""
-            fornecedor = parse_money(partes[4])
-            cliente = parse_money(partes[5])
+        if pd.isna(data_vencimento):
+            continue
+        if not fornecedor_nome or not duplicata or valor == 0:
+            continue
 
         registros.append({
-            "Carteira": carteira,
-            "Código": codigo,
-            "Data": data_atual,
-            "Tipo": tipo,
+            "Carteira": carteira_codigo,
+            "Código": carteira_codigo,
+            "Data": data_vencimento,
+            "Tipo": "FORNECEDORES",
             "Fornecedor": fornecedor_nome,
             "Duplicata": duplicata,
-            "Valor Fornecedor": fornecedor,
-            "Valor Cliente": cliente,
+            "Valor Fornecedor": valor,
+            "Valor Cliente": 0.0,
+            "Carteira Nome": carteira_nome,
         })
 
-    df_result = pd.DataFrame(registros)
-
-    if not df_result.empty:
-        df_result["Tipo"] = df_result["Tipo"].fillna("").astype(str).str.strip()
-        tipo_upper = df_result["Tipo"].str.upper()
-        desconhecido = ~tipo_upper.str.startswith(("CLIENT", "FORNECED", "IMPOSTOS"))
-        fornecedor_pos = pd.to_numeric(df_result["Valor Fornecedor"], errors="coerce").fillna(0) > 0
-        cliente_pos = pd.to_numeric(df_result["Valor Cliente"], errors="coerce").fillna(0) > 0
-        df_result.loc[desconhecido & fornecedor_pos & ~cliente_pos, "Tipo"] = "FORNECEDORES"
-        df_result.loc[desconhecido & cliente_pos & ~fornecedor_pos, "Tipo"] = "CLIENTES"
-
-    return df_result
+    return pd.DataFrame(registros)
 
 
 def eh_cliente(tipo):
@@ -710,7 +616,7 @@ with st.sidebar:
     st.caption("Tudo o que você precisa para montar a previsão está aqui.")
 
     st.subheader("📥 Entrada de dados")
-    uploaded = st.file_uploader("Carregar CSV bruto", type=["csv"], help="Selecione o arquivo CSV exportado do Tecnicon.")
+    uploaded = st.file_uploader("Carregar CSV bruto", type=["csv"], help="Selecione o relatório Tecnicon: DUPLICATAS DE FORNECEDORES A VENCER.")
 
     st.divider()
     st.subheader("📅 Previsão")
@@ -767,7 +673,7 @@ with st.sidebar:
     download_area = st.empty()
 
 if uploaded is None:
-    st.info("Carregue o cubo bruto para gerar a previsão. Sem arquivo, o sistema mostra somente a estrutura.")
+    st.info("Carregue o relatório de previsão de saída para gerar a previsão. Sem arquivo, o sistema mostra somente a estrutura.")
     st.stop()
 
 try:
