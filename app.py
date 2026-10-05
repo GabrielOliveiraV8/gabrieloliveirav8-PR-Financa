@@ -205,23 +205,28 @@ def ler_relatorio_saida(uploaded_file) -> pd.DataFrame:
         valor = parse_money(partes[5])
 
         finais = [p.strip() for p in partes[6:] if p.strip()]
-        if len(finais) < 3:
-            continue
-
-        carteira_codigo, carteira_nome, fl = finais[-3:]
 
         if pd.isna(data_vencimento) or not fornecedor_nome or not duplicata or valor == 0:
             continue
 
+        # PREVISÃO não possui carteira/código no relatório, mas é uma saída válida.
+        if duplicata.upper() == "PREVISAO":
+            registros.append({
+                "Carteira": "", "Código": "", "Data": data_vencimento,
+                "Tipo": "PREVISAO", "Fornecedor": fornecedor_nome,
+                "Duplicata": duplicata, "Valor Fornecedor": valor,
+                "Valor Cliente": 0.0, "Carteira Nome": "",
+            })
+            continue
+
+        if len(finais) < 3:
+            continue
+        carteira_codigo, carteira_nome, fl = finais[-3:]
         registros.append({
-            "Carteira": carteira_codigo,
-            "Código": carteira_codigo,
-            "Data": data_vencimento,
-            "Tipo": "FORNECEDORES",
-            "Fornecedor": fornecedor_nome,
-            "Duplicata": duplicata,
-            "Valor Fornecedor": valor,
-            "Valor Cliente": 0.0,
+            "Carteira": carteira_codigo, "Código": carteira_codigo,
+            "Data": data_vencimento, "Tipo": "FORNECEDORES",
+            "Fornecedor": fornecedor_nome, "Duplicata": duplicata,
+            "Valor Fornecedor": valor, "Valor Cliente": 0.0,
             "Carteira Nome": carteira_nome,
         })
 
@@ -237,6 +242,14 @@ def eh_fornecedor(tipo):
 
 def eh_imposto(tipo):
     return "IMPOSTOS" in str(tipo).strip().upper()
+
+
+def eh_previsao(tipo):
+    return str(tipo).strip().upper() == "PREVISAO"
+
+
+def eh_saida(tipo):
+    return eh_fornecedor(tipo) or eh_imposto(tipo) or eh_previsao(tipo)
 
 
 # ============================================================
@@ -329,7 +342,7 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
     work["Data Saída"] = work.apply(
         lambda r: proxima_compensacao(
             r["Data"], 0, sem_comp
-        ) if eh_fornecedor(r["Tipo"]) or eh_imposto(r["Tipo"]) else pd.NaT,
+        ) if eh_saida(r["Tipo"]) else pd.NaT,
         axis=1,
     )
 
@@ -573,7 +586,7 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
             work["Data Saída"].notna()
             & (work["Data Saída"].dt.normalize() == dia_ts)
             & (pd.to_numeric(work["Valor Fornecedor"], errors="coerce").fillna(0) != 0)
-            & (work["Tipo"].map(eh_fornecedor) | work["Tipo"].map(eh_imposto))
+            & work["Tipo"].map(eh_saida)
         ].copy()
 
         # Mantemos cada lançamento individualmente. Isso permite que as
@@ -641,7 +654,9 @@ def gerar_excel(df, saldo_inicial, data_inicio, config, sem_comp, data_fim=None)
             f'=SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
             f'Detalhamento!$D:$D,"*FORNECED*")+'
             f'SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
-            f'Detalhamento!$D:$D,"*IMPOSTOS*")'
+            f'Detalhamento!$D:$D,"*IMPOSTOS*")+'
+            f'SUMIFS(Detalhamento!$H:$H,Detalhamento!$A:$A,{col}$4,'
+            f'Detalhamento!$D:$D,"PREVISAO")'
         )
         ws[f"{col}13"].number_format = '#,##0.00'
 
@@ -830,12 +845,12 @@ df["Data Entrada"] = df.apply(
 # Isso evita perder pagamentos do fim de semana na previsão semanal.
 df["Data Saída"] = df.apply(
     lambda r: proxima_compensacao(r["Data"], 0, sem_comp)
-    if eh_fornecedor(r["Tipo"]) or eh_imposto(r["Tipo"]) else pd.NaT,
+    if eh_saida(r["Tipo"]) else pd.NaT,
     axis=1,
 )
 
 receber = df[df["Tipo"].map(eh_cliente)].copy()
-pagar = df[df["Tipo"].map(eh_fornecedor)].copy()
+pagar = df[df["Tipo"].map(eh_saida)].copy()
 
 # Período exibido: exatamente o intervalo escolhido.
 segunda = data_inicio
@@ -916,7 +931,7 @@ fornecedores_por_dia = []
 for d in dias:
     reg = pagar[
         pagar["Data Saída"].eq(d)
-        & (pagar["Tipo"].map(eh_fornecedor) | pagar["Tipo"].map(eh_imposto))
+        & pagar["Tipo"].map(eh_saida)
         & (pd.to_numeric(pagar["Valor Fornecedor"], errors="coerce").fillna(0) != 0)
     ].copy()
     if not reg.empty:
@@ -1023,7 +1038,7 @@ st.divider()
 
 st.subheader("🔎 Detalhamento do cálculo")
 det = df[["Data", "Carteira", "Código", "Tipo", "D+", "Valor Cliente", "Data Entrada", "Valor Fornecedor", "Data Saída", "Duplicata", "Fornecedor"]].copy()
-det["Classificação"] = det["Tipo"].map(lambda x: "Cliente" if eh_cliente(x) else ("A pagar" if eh_fornecedor(x) else ("Imposto" if eh_imposto(x) else "Não classificado")))
+det["Classificação"] = det["Tipo"].map(lambda x: "Cliente" if eh_cliente(x) else ("Imposto" if eh_imposto(x) else ("A pagar" if eh_saida(x) else "Não classificado")))
 det.columns = ["Data bruto", "Carteira", "Código", "Tipo", "D+", "Cliente", "Entrada no banco", "A pagar", "Saída", "Duplicata", "Fornecedor", "Classificação"]
 st.dataframe(det.sort_values(["Data bruto", "Carteira"]), use_container_width=True, hide_index=True)
 
